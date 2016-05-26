@@ -1,0 +1,17 @@
+<h3><%= t('Working queues') %></h3>
+
+<div class="table_container">
+  <table class="queues table table-hover table-bordered table-striped table-white">
+    <thead>
+      <th><%= t('Queue') %></th>
+      <th><%= t('Size') %></th>
+    </thead>
+    <% @queues.each do |queue| %>
+      <tr>
+        <td>
+          <a href="<%= root_path %>working/<%= queue.name %>"><%= queue.name %></a>
+        </td>
+        <td><%= number_with_delimiter(queue.size) %></td>
+      </tr>
+    <% end %>
+</table>
