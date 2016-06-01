@@ -3,6 +3,7 @@ module Sidekiq
     WORKING_QUEUE = 'working'
     DEFAULT_DEAD_AFTER = 60 * 60 * 24 # 24 hours
     DEFAULT_CLEANING_INTERVAL = 60 * 30 # 30 minutes
+    IDLE_TIMEOUT = 5 # seconds
 
     def self.setup_reliable_fetch!(config)
       config.options[:fetch] = Sidekiq::ReliableFetcher
@@ -12,9 +13,12 @@ module Sidekiq
     end
 
     def initialize(options)
-      @strictly_ordered_queues = !!options[:strict]
-      @queues = options[:queues].map { |q| "queue:#{q}" }
-      @unique_queues = @queues.uniq
+      queues = options[:queues].map { |q| "queue:#{q}" }
+
+      @unique_queues = queues.uniq
+      @queues_iterator = queues.shuffle.cycle
+      @queues_size  = queues.size
+
       @last_clean = Time.now.to_i
       @cleaning_interval = options[:cleaning_interval] || DEFAULT_CLEANING_INTERVAL
       @consider_dead_after = options[:consider_dead_after] || DEFAULT_DEAD_AFTER
@@ -23,9 +27,20 @@ module Sidekiq
     def retrieve_work
       clean_working_queues! if @cleaning_interval != -1 && Time.now.to_i - @last_clean > @cleaning_interval
 
-      queue = pick_queue
-      work = Sidekiq.redis { |conn| conn.brpoplpush(queue, "#{queue}:#{WORKING_QUEUE}", Sidekiq::Fetcher::TIMEOUT) }
-      UnitOfWork.new(queue, work) if work
+      for i in 0..@queues_size
+        queue = @queues_iterator.next
+        work = Sidekiq.redis { |conn| conn.rpoplpush(queue, "#{queue}:#{WORKING_QUEUE}") }
+
+        if work
+          return UnitOfWork.new(queue, work)
+        end
+      end
+
+      # We didn't find a job in any of the configured queues. Let's sleep a bit
+      # to avoid uselessly burning too much CPU
+      sleep(IDLE_TIMEOUT)
+
+      nil
     end
 
     def self.requeue_on_startup!(queues)
@@ -89,16 +104,6 @@ module Sidekiq
     end
 
     private
-
-    # Creating the Redis#brpoplpush command takes into account any
-    # configured queue weights. By default Redis#brpoplpush returns
-    # data from the first queue that has pending elements. We
-    # choose the queue each time we invoke Redis#brpoplpush to honor weights
-    # and avoid queue starvation.
-    def pick_queue
-      queues = @strictly_ordered_queues ? @unique_queues.dup : @queues.shuffle.uniq
-      queues.first
-    end
 
     # Detect "old" jobs and requeue them because the worker they were assigned
     # to probably failed miserably.
