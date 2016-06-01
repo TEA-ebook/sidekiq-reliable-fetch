@@ -7,7 +7,6 @@ module SidekiqReliableFetch
 
     def self.registered(app)
       app.get '/working' do
-        puts VIEW_PATH.inspect
         @queues = SidekiqReliableFetch::WorkingQueue.all
         erb File.read(File.join(VIEW_PATH, 'working_queues.erb'))
       end
