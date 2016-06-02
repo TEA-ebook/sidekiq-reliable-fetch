@@ -2,7 +2,8 @@ module Sidekiq
   class ReliableFetcher
     WORKING_QUEUE = 'working'
     DEFAULT_DEAD_AFTER = 60 * 60 * 24 # 24 hours
-    DEFAULT_CLEANING_INTERVAL = 60 * 30 # 30 minutes
+    DEFAULT_CLEANING_INTERVAL = 5000 # clean each N processed jobs
+    IDLE_TIMEOUT = 5 # seconds
 
     def self.setup_reliable_fetch!(config)
       config.options[:fetch] = Sidekiq::ReliableFetcher
@@ -12,20 +13,35 @@ module Sidekiq
     end
 
     def initialize(options)
-      @strictly_ordered_queues = !!options[:strict]
-      @queues = options[:queues].map { |q| "queue:#{q}" }
-      @unique_queues = @queues.uniq
-      @last_clean = Time.now.to_i
+      queues = options[:queues].map { |q| "queue:#{q}" }
+
+      @unique_queues = queues.uniq
+      @queues_iterator = queues.shuffle.cycle
+      @queues_size  = queues.size
+
+      @nb_fetched_jobs = 0
       @cleaning_interval = options[:cleaning_interval] || DEFAULT_CLEANING_INTERVAL
       @consider_dead_after = options[:consider_dead_after] || DEFAULT_DEAD_AFTER
     end
 
     def retrieve_work
-      clean_working_queues! if @cleaning_interval != -1 && Time.now.to_i - @last_clean > @cleaning_interval
+      clean_working_queues! if @cleaning_interval != -1 && @nb_fetched_jobs >= @cleaning_interval
 
-      queue = pick_queue
-      work = Sidekiq.redis { |conn| conn.brpoplpush(queue, "#{queue}:#{WORKING_QUEUE}", Sidekiq::Fetcher::TIMEOUT) }
-      UnitOfWork.new(queue, work) if work
+      for i in 0..@queues_size
+        queue = @queues_iterator.next
+        work = Sidekiq.redis { |conn| conn.rpoplpush(queue, "#{queue}:#{WORKING_QUEUE}") }
+
+        if work
+          @nb_fetched_jobs += 1
+          return UnitOfWork.new(queue, work)
+        end
+      end
+
+      # We didn't find a job in any of the configured queues. Let's sleep a bit
+      # to avoid uselessly burning too much CPU
+      sleep(IDLE_TIMEOUT)
+
+      nil
     end
 
     def self.requeue_on_startup!(queues)
@@ -90,16 +106,6 @@ module Sidekiq
 
     private
 
-    # Creating the Redis#brpoplpush command takes into account any
-    # configured queue weights. By default Redis#brpoplpush returns
-    # data from the first queue that has pending elements. We
-    # choose the queue each time we invoke Redis#brpoplpush to honor weights
-    # and avoid queue starvation.
-    def pick_queue
-      queues = @strictly_ordered_queues ? @unique_queues.dup : @queues.shuffle.uniq
-      queues.first
-    end
-
     # Detect "old" jobs and requeue them because the worker they were assigned
     # to probably failed miserably.
     # NOTE Potential problem here if a specific job always make a worker
@@ -111,7 +117,7 @@ module Sidekiq
         clean_working_queue!(queue)
       end
 
-      @last_clean = Time.now.to_i
+      @nb_fetched_jobs = 0
     end
 
     def clean_working_queue!(queue)
@@ -121,12 +127,12 @@ module Sidekiq
           enqueued_at = Sidekiq.load_json(job)['enqueued_at'].to_i
           job_duration = Time.now.to_i - enqueued_at
 
-          if job_duration > @consider_dead_after
-            Sidekiq.logger.info "Requeued a dead job found in #{queue}:#{WORKING_QUEUE}"
+          next if job_duration < @consider_dead_after
 
-            conn.rpush("#{queue}", job)
-            conn.lrem("#{queue}:#{WORKING_QUEUE}", 1, job)
-          end
+          Sidekiq.logger.info "Requeued a dead job from #{queue}:#{WORKING_QUEUE}"
+
+          conn.rpush("#{queue}", job)
+          conn.lrem("#{queue}:#{WORKING_QUEUE}", 1, job)
         end
       end
     end
