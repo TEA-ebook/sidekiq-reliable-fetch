@@ -2,7 +2,7 @@ module Sidekiq
   class ReliableFetcher
     WORKING_QUEUE = 'working'
     DEFAULT_DEAD_AFTER = 60 * 60 * 24 # 24 hours
-    DEFAULT_CLEANING_INTERVAL = 60 * 30 # 30 minutes
+    DEFAULT_CLEANING_INTERVAL = 5000 # clean each N processed jobs
     IDLE_TIMEOUT = 5 # seconds
 
     def self.setup_reliable_fetch!(config)
@@ -19,19 +19,20 @@ module Sidekiq
       @queues_iterator = queues.shuffle.cycle
       @queues_size  = queues.size
 
-      @last_clean = Time.now.to_i
+      @nb_fetched_jobs = 0
       @cleaning_interval = options[:cleaning_interval] || DEFAULT_CLEANING_INTERVAL
       @consider_dead_after = options[:consider_dead_after] || DEFAULT_DEAD_AFTER
     end
 
     def retrieve_work
-      clean_working_queues! if @cleaning_interval != -1 && Time.now.to_i - @last_clean > @cleaning_interval
+      clean_working_queues! if @cleaning_interval != -1 && @nb_fetched_jobs >= @cleaning_interval
 
       for i in 0..@queues_size
         queue = @queues_iterator.next
         work = Sidekiq.redis { |conn| conn.rpoplpush(queue, "#{queue}:#{WORKING_QUEUE}") }
 
         if work
+          @nb_fetched_jobs += 1
           return UnitOfWork.new(queue, work)
         end
       end
@@ -116,7 +117,7 @@ module Sidekiq
         clean_working_queue!(queue)
       end
 
-      @last_clean = Time.now.to_i
+      @nb_fetched_jobs = 0
     end
 
     def clean_working_queue!(queue)
@@ -126,12 +127,12 @@ module Sidekiq
           enqueued_at = Sidekiq.load_json(job)['enqueued_at'].to_i
           job_duration = Time.now.to_i - enqueued_at
 
-          if job_duration > @consider_dead_after
-            Sidekiq.logger.info "Requeued a dead job found in #{queue}:#{WORKING_QUEUE}"
+          next if job_duration < @consider_dead_after
 
-            conn.rpush("#{queue}", job)
-            conn.lrem("#{queue}:#{WORKING_QUEUE}", 1, job)
-          end
+          Sidekiq.logger.info "Requeued a dead job from #{queue}:#{WORKING_QUEUE}"
+
+          conn.rpush("#{queue}", job)
+          conn.lrem("#{queue}:#{WORKING_QUEUE}", 1, job)
         end
       end
     end
