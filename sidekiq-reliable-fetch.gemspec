@@ -1,6 +1,6 @@
 Gem::Specification.new do |s|
   s.name        = 'sidekiq-reliable-fetch'
-  s.version     = '0.1.0'
+  s.version     = '0.2.0'
   s.authors     = ['TEA']
   s.email       = 'technique@tea-ebook.com'
   s.license     = 'LGPL-3.0'
