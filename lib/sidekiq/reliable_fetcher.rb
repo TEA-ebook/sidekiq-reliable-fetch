@@ -27,7 +27,7 @@ module Sidekiq
     def retrieve_work
       clean_working_queues! if @cleaning_interval != -1 && @nb_fetched_jobs >= @cleaning_interval
 
-      for i in 0..@queues_size
+      @queues_size.time do
         queue = @queues_iterator.next
         work = Sidekiq.redis { |conn| conn.rpoplpush(queue, "#{queue}:#{WORKING_QUEUE}") }
 
