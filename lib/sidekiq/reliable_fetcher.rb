@@ -70,7 +70,7 @@ module Sidekiq
       Sidekiq.redis do |conn|
         conn.pipelined do
           inprogress.each do |unit_of_work|
-            conn.rpush("#{unit_of_work.queue}", unit_of_work.message)
+            conn.lpush("#{unit_of_work.queue}", unit_of_work.message)
             conn.lrem("#{unit_of_work.queue}:#{WORKING_QUEUE}", 1, unit_of_work.message)
           end
         end
@@ -97,7 +97,7 @@ module Sidekiq
       def requeue
         Sidekiq.redis do |conn|
           conn.pipelined do
-            conn.rpush(queue, message)
+            conn.lpush(queue, message)
             conn.lrem("#{queue}:#{WORKING_QUEUE}", 1, message)
           end
         end
@@ -131,7 +131,7 @@ module Sidekiq
 
           Sidekiq.logger.info "Requeued a dead job from #{queue}:#{WORKING_QUEUE}"
 
-          conn.rpush("#{queue}", job)
+          conn.lpush("#{queue}", job)
           conn.lrem("#{queue}:#{WORKING_QUEUE}", 1, job)
         end
       end
